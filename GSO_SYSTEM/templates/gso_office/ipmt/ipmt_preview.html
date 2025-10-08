@@ -19,7 +19,7 @@
                 <th>Success Indicators</th>
                 <th>Actual Accomplishments</th>
                 <th>Remarks</th>
-                <th class="action-col d-none">Action</th> <!-- hide by default -->
+                <th class="action-col d-none">Action</th>
             </tr>
         </thead>
         <tbody>
@@ -72,7 +72,7 @@ document.addEventListener("DOMContentLoaded", function() {
             const remarksText = row.querySelector(".remarks-text");
             const deleteBtn = row.querySelector(".delete-btn");
 
-            if (!descInput) return;  // skip placeholder row
+            if (!descInput) return;
 
             originalData.push({
                 desc: descInput.value,
@@ -96,7 +96,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
     function exitEditMode() {
         editMode = false;
-        rows = table.querySelectorAll("tbody tr"); // refresh after deletions
+        rows = table.querySelectorAll("tbody tr");
         rows.forEach((row, index) => {
             const descInput = row.querySelector(".desc-input");
             const remarksInput = row.querySelector(".remarks-input");
@@ -158,7 +158,7 @@ document.addEventListener("DOMContentLoaded", function() {
             body: JSON.stringify({
                 month: "{{ month_filter }}",
                 unit: "{{ unit_filter }}",
-                personnel: {{ personnel_names|safe }},
+                personnel: {{ personnel_names|safe }}.join(","),
                 rows: payload
             })
         });
@@ -171,12 +171,13 @@ document.addEventListener("DOMContentLoaded", function() {
         }
     });
 
+    // ✅ FIXED EXPORT SECTION
     acceptBtn?.addEventListener("click", function() {
         const payload = [];
         rows.forEach(row => {
             const descInput = row.querySelector(".desc-input");
             const remarksInput = row.querySelector(".remarks-input");
-            if (!descInput) return; // skip placeholder row
+            if (!descInput) return;
             payload.push({
                 indicator: row.children[0].textContent.trim(),
                 description: descInput.value.trim(),
@@ -189,11 +190,11 @@ document.addEventListener("DOMContentLoaded", function() {
         form.method = "POST";
         form.action = "{% url 'gso_reports:generate_ipmt' %}";
 
-        const input = document.createElement("input");
-        input.type = "hidden";
-        input.name = "rows";
-        input.value = JSON.stringify(payload);
-        form.appendChild(input);
+        const rowsInput = document.createElement("input");
+        rowsInput.type = "hidden";
+        rowsInput.name = "rows";
+        rowsInput.value = JSON.stringify(payload);
+        form.appendChild(rowsInput);
 
         const monthInput = document.createElement("input");
         monthInput.type = "hidden";
@@ -206,6 +207,13 @@ document.addEventListener("DOMContentLoaded", function() {
         unitInput.name = "unit";
         unitInput.value = "{{ unit_filter }}";
         form.appendChild(unitInput);
+
+        // ✅ FIX: Include personnel names
+        const personnelInput = document.createElement("input");
+        personnelInput.type = "hidden";
+        personnelInput.name = "personnel";
+        personnelInput.value = {{ personnel_names|safe }}.join(",");
+        form.appendChild(personnelInput);
 
         const csrfInput = document.createElement("input");
         csrfInput.type = "hidden";

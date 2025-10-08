@@ -6,6 +6,7 @@ import openpyxl
 from datetime import datetime
 from django.conf import settings
 from django.http import HttpResponse
+from django.db.models import Q
 
 from django.shortcuts import render
 from django.contrib.auth.decorators import login_required, user_passes_test
@@ -116,7 +117,6 @@ def accomplishment_report(request):
         },
     )
 
-
 # -------------------------------
 # Generate IPMT Excel
 # -------------------------------
@@ -124,35 +124,49 @@ def accomplishment_report(request):
 @user_passes_test(is_gso_or_director)
 def generate_ipmt(request):
     import json
+    import calendar
+    import os
+    import openpyxl
+    from django.http import HttpResponse
+    from django.conf import settings
 
     reports = []
     personnel_list = []
 
-    # --- Handle POST (from edited preview) ---
-    if request.method == "POST" and request.POST.get("rows"):
+    # --- Handle POST (from edited preview OR export form) ---
+    if request.method == "POST":
+        # ✅ Handle both JSON and form POST
         try:
-            reports = json.loads(request.POST.get("rows"))
-        except json.JSONDecodeError:
-            return HttpResponse("Invalid row data.", status=400)
+            # Try JSON (Save button)
+            body = json.loads(request.body.decode("utf-8"))
+            month_filter = body.get("month")
+            unit_filter = body.get("unit")
+            personnel_param = body.get("personnel", "")
+            reports = body.get("rows", [])
+        except Exception:
+            # Fallback to form POST (Export button)
+            month_filter = request.POST.get("month")
+            unit_filter = request.POST.get("unit")
+            personnel_param = request.POST.get("personnel", "")
+            rows_data = request.POST.get("rows", "[]")
+            try:
+                reports = json.loads(rows_data)
+            except json.JSONDecodeError:
+                reports = []
 
-        month_filter = request.POST.get("month")
-        unit_filter = request.POST.get("unit")
-        personnel_param = request.POST.get("personnel") or ""
+        # ✅ Convert personnel list
         personnel_list = [p.strip() for p in personnel_param.split(",") if p.strip()]
 
         # Update indicator to include code + description from SuccessIndicator
         for r in reports:
-            # Extract the code (handles "CF8" or "CF8 - desc")
+            if not r.get("indicator"):
+                continue
             code_only = r["indicator"].split(" - ")[0].strip()
-
-            # Fetch SuccessIndicator
             si = SuccessIndicator.objects.filter(code__iexact=code_only).first()
-
-            # Use full "code - description" if exists
             if si:
                 r["indicator"] = f"{si.code} - {si.description}"
 
-    # --- Handle GET fallback ---
+    # --- Handle GET fallback (for debugging / direct access) ---
     else:
         personnel_param = request.GET.get("personnel")
         month_filter = request.GET.get("month")
@@ -165,10 +179,9 @@ def generate_ipmt(request):
         month_name = f"{calendar.month_name[month_num]} {year}"
         personnel_list = [p.strip() for p in personnel_param.split(",")]
 
-        for username in personnel_list:
-            try:
-                user = User.objects.get(username=username)
-            except User.DoesNotExist:
+        for identifier in personnel_list:
+            user = get_user_by_identifier(identifier)
+            if not user:
                 continue
 
             # --- Fetch saved IPMT rows first ---
@@ -186,7 +199,7 @@ def generate_ipmt(request):
                         "remarks": row.remarks or "",
                     })
             else:
-                # --- Fallback: fetch WARs ---
+                # --- Fallback: WARs ---
                 wars = WorkAccomplishmentReport.objects.filter(
                     assigned_personnel=user,
                     unit__name__iexact=unit_filter,
@@ -218,7 +231,7 @@ def generate_ipmt(request):
                             "remarks": "Complied" if war.description else "",
                         })
 
-                # --- Fallback: fetch completed ServiceRequests ---
+                # --- Fallback: Completed ServiceRequests ---
                 completed_requests = ServiceRequest.objects.filter(
                     assigned_personnel=user,
                     unit__name__iexact=unit_filter,
@@ -239,27 +252,51 @@ def generate_ipmt(request):
     wb = openpyxl.load_workbook(template_path)
     ws = wb.active
 
-    # --- Header info for Excel ---
+    # --- Build personnel full names ---
     personnel_fullnames = []
-    for username in personnel_list:
-        user_obj = User.objects.filter(username=username).first()  # lookup by username
+    for identifier in personnel_list:
+        user_obj = get_user_by_identifier(identifier)
         if user_obj:
-            # Use full_name if exists, else fallback to username
-            personnel_fullnames.append(user_obj.get_full_name() or user_obj.username)
+            full_name = (user_obj.get_full_name() or "").strip()
+            if full_name:
+                personnel_fullnames.append(full_name)
+            elif user_obj.first_name or user_obj.last_name:
+                personnel_fullnames.append(f"{user_obj.first_name} {user_obj.last_name}".strip())
+            else:
+                personnel_fullnames.append(user_obj.username)
         else:
-            personnel_fullnames.append(username)  # fallback if user not found
+            personnel_fullnames.append(identifier)
 
-    ws["B8"] = ", ".join(personnel_fullnames)
-    ws["B11"] = month_filter if request.method == "POST" else month_name
+    # --- Debug log ---
+    print("=== IPMT Personnel Fullnames ===")
+    print(personnel_fullnames)
 
-    # Write reports starting row 13
+    # --- Write to Excel ---
+    try:
+        ws["B8"] = ", ".join(personnel_fullnames) if personnel_fullnames else "No personnel found"
+    except Exception as e:
+        print(f"Error writing to Excel B8: {e}")
+        ws.cell(row=8, column=2, value=", ".join(personnel_fullnames))
+
+    # --- Write month ---
+    try:
+        if "-" in month_filter:
+            year, month_num = map(int, month_filter.split("-"))
+            month_name = f"{calendar.month_name[month_num]} {year}"
+        else:
+            month_name = month_filter
+        ws["B11"] = month_name
+    except Exception as e:
+        print(f"Error writing to Excel B11: {e}")
+
+    # --- Write reports ---
     start_row = 13
     for i, r in enumerate(reports, start=start_row):
-        ws.cell(row=i, column=1).value = r.get("indicator")
-        ws.cell(row=i, column=2).value = r.get("description")
-        ws.cell(row=i, column=3).value = r.get("remarks")
+        ws.cell(row=i, column=1).value = r.get("indicator", "")
+        ws.cell(row=i, column=2).value = r.get("description", "")
+        ws.cell(row=i, column=3).value = r.get("remarks", "")
 
-    # Return Excel file
+    # --- Return Excel ---
     response = HttpResponse(
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
@@ -312,7 +349,7 @@ def preview_ipmt(request):
 
     for person_name in personnel_names:
         # Lookup by full name (adjust as needed)
-        user = User.objects.filter(username=person_name).first()
+        user = get_user_by_identifier(person_name)
         if not user:
             continue
 
@@ -377,7 +414,7 @@ def save_ipmt(request):
         return JsonResponse({"error": "Unit not found"}, status=404)
 
     for person_name in personnel_names:
-        user = User.objects.filter(username=person_name).first()
+        user = get_user_by_identifier(person_name)
         if not user:
             continue
 
@@ -423,3 +460,34 @@ def save_ipmt(request):
     return JsonResponse({"status": "success"})
 
 
+
+
+# --- Helper ---
+def get_user_by_identifier(identifier):
+    """Find user by username, full name, or partial name (case-insensitive)."""
+    identifier = identifier.strip()
+    if not identifier:
+        return None
+
+    # Try exact username
+    user = User.objects.filter(username__iexact=identifier).first()
+    if user:
+        return user
+
+    # Try full name match
+    parts = identifier.split()
+    if len(parts) >= 2:
+        first, last = parts[0], parts[-1]
+        user = User.objects.filter(
+            Q(first_name__iexact=first) & Q(last_name__iexact=last)
+        ).first()
+        if user:
+            return user
+
+    # Try partial match
+    return (
+        User.objects.filter(
+            Q(first_name__icontains=identifier) |
+            Q(last_name__icontains=identifier)
+        ).first()
+    )
